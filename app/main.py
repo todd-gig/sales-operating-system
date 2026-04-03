@@ -66,6 +66,10 @@ def create_app() -> FastAPI:
     # ── Routes ────────────────────────────────────────────────────────────────
     app.include_router(router, prefix="/api/v1")
 
+    @app.get("/health", tags=["meta"])
+    def root_health() -> dict:
+        return {"status": "ok", "version": "0.1.0"}
+
     return app
 
 
