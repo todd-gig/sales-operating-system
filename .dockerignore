@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.git/
+.gitignore
+.env
+*.md
+tests/
+scripts/
+*.db
+*.db-shm
+*.db-wal
