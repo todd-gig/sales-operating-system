@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel, Field
 
 from app.models.database import Database, get_db
 from app.models.schemas import (
@@ -53,6 +54,12 @@ from app.services.google_service import (
     create_gmail_draft,
     create_followup_draft,
     GoogleAuthError,
+)
+from app.services.gigaton_pricing import (
+    GigatonPricingClient,
+    PricingQuoteRequest,
+    CostBreakdown,
+    get_gigaton_client,
 )
 
 router = APIRouter()
@@ -1055,4 +1062,232 @@ def detect_opportunity_needs(
         "opportunity_id": opportunity_id,
         "matched_need_state_ids": matched_ids,
         "count": len(matched_ids),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gigaton Engine — Pricing Integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class PricingCostInput(BaseModel):
+    """Cost breakdown forwarded to gigaton-engine for margin calculation."""
+    direct_labor: float = 0.0
+    indirect_labor: float = 0.0
+    tooling: float = 0.0
+    delivery: float = 0.0
+    support: float = 0.0
+    acquisition: float = 0.0
+    overhead: float = 0.0
+
+
+class ProductPricingRequest(BaseModel):
+    """Request body for POST /pricing/quote."""
+    base_price: float = Field(gt=0, description="List price or subscription fee in USD")
+    pricing_type: str = Field(default="fixed", description="fixed | tiered | subscription | hybrid")
+    units: int = Field(default=1, ge=1)
+    discount_rate: float = Field(default=0.0, ge=0.0, le=0.30)
+    contract_term_months: int = Field(default=12, ge=1)
+    costs: PricingCostInput = Field(default_factory=PricingCostInput)
+    min_acceptable_margin: float = Field(default=0.20, ge=0.0, le=1.0)
+    target_gross_margin: float = Field(default=0.50, ge=0.0, le=1.0)
+
+
+class OpportunityPricingRequest(BaseModel):
+    """Cost inputs for opportunity pricing (applied uniformly to all products)."""
+    discount_rate: float = Field(default=0.0, ge=0.0, le=0.30)
+    contract_term_months: int = Field(default=12, ge=1)
+    costs: PricingCostInput = Field(default_factory=PricingCostInput)
+    product_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Subset of product IDs to price; None = all recommendations",
+    )
+
+
+@router.get("/gigaton/status", tags=["gigaton"])
+def gigaton_status() -> Dict[str, Any]:
+    """Check whether gigaton-engine is reachable and return its URL."""
+    client = get_gigaton_client()
+    return client.health()
+
+
+@router.post("/pricing/quote", tags=["gigaton"])
+def price_quote(req: ProductPricingRequest) -> Dict[str, Any]:
+    """
+    Compute a margin-governed price for a single product via gigaton-engine.
+
+    Returns recommended_price, floor_price, gross_margin, margin_warnings,
+    and approval_required flag.  Returns 503 if gigaton-engine is unreachable.
+    """
+    client = get_gigaton_client()
+    costs = CostBreakdown(
+        direct_labor=req.costs.direct_labor,
+        indirect_labor=req.costs.indirect_labor,
+        tooling=req.costs.tooling,
+        delivery=req.costs.delivery,
+        support=req.costs.support,
+        acquisition=req.costs.acquisition,
+        overhead=req.costs.overhead,
+    )
+    pricing_req = PricingQuoteRequest(
+        pricing_type=req.pricing_type,
+        base_price=req.base_price,
+        units=req.units,
+        discount_rate=req.discount_rate,
+        contract_term_months=req.contract_term_months,
+        min_acceptable_margin=req.min_acceptable_margin,
+        target_gross_margin=req.target_gross_margin,
+        costs=costs,
+    )
+    result = client.calculate(pricing_req)
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Gigaton Engine is unavailable. Set GIGATON_ENGINE_URL or start the engine.",
+        )
+    return {
+        "input": {
+            "base_price": req.base_price,
+            "pricing_type": req.pricing_type,
+            "units": req.units,
+            "discount_rate": req.discount_rate,
+            "total_cost": costs.total,
+        },
+        "pricing": result.to_dict(),
+        "margin_ok": result.margin_ok,
+        "margin_pct": result.margin_pct,
+    }
+
+
+@router.post(
+    "/opportunities/{opportunity_id}/pricing",
+    tags=["gigaton"],
+)
+def opportunity_pricing(
+    opportunity_id: str,
+    req: OpportunityPricingRequest,
+    db: Database = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Get margin-governed prices for all (or a subset of) recommended products
+    in an opportunity, calculated via gigaton-engine.
+
+    Each product is priced using the shared cost inputs in the request body.
+    Products without a base_price in the catalog are skipped.
+
+    Returns:
+        {
+            "opportunity_id": ...,
+            "gigaton_engine_available": bool,
+            "priced_count": int,
+            "skipped_count": int,
+            "quotes": [
+                {
+                    "product_id": ...,
+                    "product_name": ...,
+                    "base_price": ...,
+                    "pricing": { recommended_price, gross_margin, ... } | null,
+                    "margin_ok": bool | null,
+                }
+            ]
+        }
+    """
+    opp = db.get("opportunities", opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+
+    # Resolve which products to price
+    if req.product_ids:
+        product_rows = [
+            db.get("product_catalog", pid)
+            for pid in req.product_ids
+            if db.get("product_catalog", pid)
+        ]
+    else:
+        # Use top recommendations for this opportunity
+        rec_rows = db.query(
+            "SELECT DISTINCT target_product_id FROM recommendations "
+            "WHERE opportunity_id = ? AND target_product_id IS NOT NULL "
+            "  AND status NOT IN ('rejected','canceled') "
+            "ORDER BY confidence_score DESC LIMIT 20",
+            [opportunity_id],
+        )
+        product_rows = [
+            db.get("product_catalog", r["target_product_id"])
+            for r in rec_rows
+            if db.get("product_catalog", r.get("target_product_id", ""))
+        ]
+
+    if not product_rows:
+        # Fall back to all active catalog products (up to 20)
+        product_rows = db.list_all("product_catalog", {"is_active": 1})[:20]
+
+    costs = CostBreakdown(
+        direct_labor=req.costs.direct_labor,
+        indirect_labor=req.costs.indirect_labor,
+        tooling=req.costs.tooling,
+        delivery=req.costs.delivery,
+        support=req.costs.support,
+        acquisition=req.costs.acquisition,
+        overhead=req.costs.overhead,
+    )
+
+    client = get_gigaton_client()
+    engine_available = client.is_available()
+
+    quotes = []
+    priced = 0
+    skipped = 0
+
+    for product in product_rows:
+        if not product:
+            continue
+
+        pid = product.get("id", "")
+        pname = product.get("name", pid)
+        # Products may store a numeric base_price; fall back to interaction_value as proxy
+        base = product.get("base_price") or (product.get("interaction_value", 1) * 500.0)
+
+        if engine_available and base and float(base) > 0:
+            result = client.quote_product(
+                base_price=float(base),
+                costs=costs,
+                units=1,
+                discount_rate=req.discount_rate,
+                contract_term_months=req.contract_term_months,
+            )
+            if result:
+                priced += 1
+                quotes.append({
+                    "product_id": pid,
+                    "product_name": pname,
+                    "base_price": float(base),
+                    "pricing": result.to_dict(),
+                    "margin_ok": result.margin_ok,
+                })
+            else:
+                skipped += 1
+                quotes.append({
+                    "product_id": pid,
+                    "product_name": pname,
+                    "base_price": float(base),
+                    "pricing": None,
+                    "margin_ok": None,
+                })
+        else:
+            skipped += 1
+            quotes.append({
+                "product_id": pid,
+                "product_name": pname,
+                "base_price": float(base) if base else None,
+                "pricing": None,
+                "margin_ok": None,
+            })
+
+    return {
+        "opportunity_id": opportunity_id,
+        "gigaton_engine_available": engine_available,
+        "priced_count": priced,
+        "skipped_count": skipped,
+        "quotes": quotes,
     }
