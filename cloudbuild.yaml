@@ -1,0 +1,56 @@
+steps:
+  # ── Build ──────────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+      - -t
+      - gcr.io/$PROJECT_ID/sales-operating-system:latest
+      - .
+
+  # ── Push ──────────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [push, gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA]
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [push, gcr.io/$PROJECT_ID/sales-operating-system:latest]
+
+  # ── Deploy to Cloud Run ───────────────────────────────────────────────────
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - sales-operating-system
+      - --image=gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+      - --region=us-central1
+      - --platform=managed
+      - --port=8003
+      - --min-instances=0
+      - --max-instances=5
+      - --memory=512Mi
+      - --cpu=1
+      - --timeout=60
+      - --no-allow-unauthenticated
+      # Environment variables
+      # GIGATON_ENGINE_URL: internal Cloud Run URL for gigaton-engine
+      # Format: https://gigaton-engine-<hash>-uc.a.run.app
+      # Set this in Cloud Run console or replace $$GIGATON_ENGINE_URL below
+      - --set-env-vars=DATABASE_PATH=/data/sales_os.db,CORS_ORIGINS=https://gigaton-ui.web.app
+      # Secrets (configure in Secret Manager, then reference here):
+      # - --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest
+      # - --set-secrets=GIGATON_ENGINE_URL=gigaton-engine-url:latest
+      # - --set-secrets=GOOGLE_CREDENTIALS_PATH=google-credentials-path:latest
+      # Persistent SQLite volume — Cloud Run NFS or GCS FUSE mount
+      # Configure in Cloud Run console: Mount path /data → NFS/GCS bucket
+      # Uncomment and fill in when volume is provisioned:
+      # - --add-volume=name=salesos-data,type=cloud-storage,bucket=$$GCS_BUCKET
+      # - --add-volume-mount=volume=salesos-data,mount-path=/data
+
+images:
+  - gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+  - gcr.io/$PROJECT_ID/sales-operating-system:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
