@@ -27,11 +27,13 @@ steps:
       - --region=us-central1
       - --platform=managed
       - --port=8003
-      - --min-instances=0
+      - --min-instances=1
       - --max-instances=5
       - --memory=512Mi
       - --cpu=1
-      - --timeout=60
+      - --cpu-boost
+      - --timeout=300
+      - --startup-probe=tcpSocket.port=8003,initialDelaySeconds=0,periodSeconds=10,timeoutSeconds=5,failureThreshold=30
       - --no-allow-unauthenticated
       # Environment variables
       # GIGATON_ENGINE_URL: internal Cloud Run URL for gigaton-engine
