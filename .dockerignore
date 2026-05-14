@@ -12,3 +12,16 @@ scripts/
 *.db
 *.db-shm
 *.db-wal
+# Google credentials — injected via Secret Manager, never baked into image
+credentials.json
+token.json
+service_account.json
+*.pem
+*.key
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

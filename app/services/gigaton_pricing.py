@@ -116,7 +116,12 @@ class PricingQuoteRequest:
 
 @dataclass
 class PricingQuoteResult:
-    """Result from gigaton-engine's /pricing/calculate."""
+    """Result from gigaton-engine's /pricing/calculate.
+
+    Carries upstream `assumptions[]` per CRIT-008 — never present a
+    pricing recommendation downstream without the assumptions that
+    produced it.
+    """
     recommended_price: float
     floor_price: float
     gross_margin: float
@@ -125,6 +130,7 @@ class PricingQuoteResult:
     discount_impact: float
     margin_warnings: list[str]
     approval_required: bool
+    assumptions: list[str] = field(default_factory=list)
 
     @classmethod
     def from_response(cls, data: dict) -> "PricingQuoteResult":
@@ -137,6 +143,7 @@ class PricingQuoteResult:
             discount_impact=data.get("discount_impact", 0.0),
             margin_warnings=data.get("margin_warnings", []),
             approval_required=data.get("approval_required", False),
+            assumptions=data.get("assumptions", []),
         )
 
     def to_dict(self) -> dict:
@@ -149,6 +156,7 @@ class PricingQuoteResult:
             "discount_impact": round(self.discount_impact, 4),
             "margin_warnings": self.margin_warnings,
             "approval_required": self.approval_required,
+            "assumptions": self.assumptions,
         }
 
     @property

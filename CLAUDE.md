@@ -119,3 +119,21 @@ This project is the commercial intelligence backbone of the broader Gigaton / Ca
 - **LiquiFex**: portfolio product recommendations
 
 Any changes to scoring weights, catalog items, or bundle definitions must be reviewed against downstream system dependencies.
+
+---
+
+## Doctrine alignment
+
+Single source of truth for first principles, methodology, and anti-patterns:
+
+- [`decision-engine/drift_sentinel/GIGATON_CANONICAL_FIRST_PRINCIPLES.md`](https://github.com/todd-gig/decision-engine/blob/main/drift_sentinel/GIGATON_CANONICAL_FIRST_PRINCIPLES.md) — 7 non-negotiables, 15 first principles, 8 ethos filters, 17 frameworks, 12 anti-patterns
+- [`decision-engine/MASTER_FIRST_PRINCIPLES_REFERENCE.md`](https://github.com/todd-gig/decision-engine/blob/main/MASTER_FIRST_PRINCIPLES_REFERENCE.md) — thresholds, weights, formulas, decision pathways
+
+### Doctrine-driven constraints (apply here)
+
+- **CRIT-003** — `app/services/claude_reasoning.py` LLM calls must carry `prompt_version` + `schema_version` (already remediated 2026-05-05 via `_call()` audit envelope)
+- **CRIT-007** — every LLM call must accept `provider` + `model` (already remediated 2026-05-05)
+- **Development Rule #3 above** ("Recommendation engine is rules-based") aligns with canonical §5.8 (Decision Routing Framework: Python-First when stable + auditable + high-volume) — never weaken
+- **Mn-05 open** — seed-file UX: `scripts/seed_from_xlsx.py:468` defaults to `~/Desktop/Sales_Operating_System.xlsx` which doesn't exist in deployment; document fallback behavior or fail-fast at startup. Tracked in BETA_2_GAP_LIST.
+- **Mn-06 open** — Cloud Run SQLite is ephemeral; production deployments need GCS FUSE mount (commented in cloudbuild.yaml) or migration to Cloud SQL. Tracked in BETA_2_GAP_LIST.
+- **Slack is user-level only** — agent runtime and recommendation engine must not post to Slack autonomously
