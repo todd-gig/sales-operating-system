@@ -154,21 +154,52 @@ else
     --project="$PROJECT_ID"
 fi
 
+# GCP IAM has eventual consistency — newly-created SAs can take ~10-30s
+# to become visible to add-iam-policy-binding. Poll describe until it
+# reliably returns before attempting bindings.
+echo "  ↳ Waiting for IAM propagation..."
+for i in $(seq 1 30); do
+  if gcloud iam service-accounts describe "$RUNTIME_SA_EMAIL" \
+       --project="$PROJECT_ID" >/dev/null 2>&1; then
+    if [[ $i -gt 1 ]]; then
+      echo "    settled after ${i}s"
+    fi
+    break
+  fi
+  sleep 1
+done
+
 # ── 6. IAM grants ───────────────────────────────────────────────────────────
 echo
 echo "▶ [6/7] IAM grants on runtime SA"
-# cloudsql.client — required for Cloud SQL Auth Proxy
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
-  --role="roles/cloudsql.client" \
-  --condition=None \
-  --quiet
-# secretmanager.secretAccessor — to read DB_PASSWORD secret
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
-  --role="roles/secretmanager.secretAccessor" \
-  --condition=None \
-  --quiet
+# Retry each binding up to 3 times — the SA describe-check above usually
+# settles things, but the project IAM service has its own propagation
+# layer that can lag a few seconds longer.
+_grant() {
+  local role="$1"
+  for attempt in 1 2 3; do
+    if gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+         --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+         --role="$role" \
+         --condition=None \
+         --quiet 2>/tmp/iam-grant-err.$$; then
+      return 0
+    fi
+    if grep -q "does not exist" /tmp/iam-grant-err.$$ 2>/dev/null \
+       || grep -q "NOT_FOUND" /tmp/iam-grant-err.$$ 2>/dev/null; then
+      echo "    propagation lag on attempt $attempt; retrying in 5s..."
+      sleep 5
+      continue
+    fi
+    cat /tmp/iam-grant-err.$$ >&2
+    return 1
+  done
+  echo "ERROR: $role binding failed after 3 attempts" >&2
+  return 1
+}
+_grant "roles/cloudsql.client"
+_grant "roles/secretmanager.secretAccessor"
+rm -f /tmp/iam-grant-err.$$
 echo "  ↳ Granted: cloudsql.client + secretmanager.secretAccessor"
 
 # ── 7. Run initial Alembic migration ───────────────────────────────────────
