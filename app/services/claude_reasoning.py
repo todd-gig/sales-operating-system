@@ -5,15 +5,22 @@ Claude-powered reasoning layer for the Sales Operating System.
 Adds natural-language explanation and narrative generation on top of the
 rules-based recommendation engine. The engine scores; Claude explains.
 
-Required env var:
-    ANTHROPIC_API_KEY — Anthropic API key
+Runtime governance (Gigaton Canonical First Principles §6 + CRIT-003 +
+CRIT-007): all LLM calls flow through `_call`, which routes to the
+decision-engine `/v1/ai/invoke` HTTP endpoint (the ecosystem-wide
+chokepoint) when DECISION_ENGINE_URL is set. The chokepoint enforces
+prompt_version + schema_version + provider + model server-side and
+writes an HMAC-signed audit row to `llm_audit`.
 
-If not configured, all functions return graceful fallbacks so the
-deterministic rules engine continues to work without Claude.
+When DECISION_ENGINE_URL is unset (local dev / tests), falls back to
+direct Anthropic SDK with the original audit-log line.
 
-Runtime governance (Gigaton Canonical First Principles §6): all LLM calls
-flow through `_call`, which carries provider, model, prompt_version, and
-schema_version, and emits an audit log line per invocation.
+Environment:
+    DECISION_ENGINE_URL              base URL of decision-engine FastAPI
+                                     (set in prod cloudbuild env)
+    ANTHROPIC_API_KEY                required for direct fallback only
+    SALES_OS_AI_ROUTER_DISABLED=1    kill-switch (force direct fallback)
+    SALES_OS_AI_ROUTER_TIMEOUT_S     HTTP timeout, default 60
 """
 from __future__ import annotations
 
@@ -21,6 +28,8 @@ import json
 import logging
 import os
 import re
+import urllib.error
+import urllib.request
 from typing import Any
 
 try:
@@ -43,7 +52,18 @@ _audit_log = logging.getLogger("sales_os.llm_audit")
 
 
 def is_available() -> bool:
+    """True if EITHER ai_router is reachable OR direct Anthropic is configured."""
+    if _decision_engine_url() is not None:
+        return True
     return _AVAILABLE and bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def _decision_engine_url() -> "str | None":
+    """Return the decision-engine base URL when routing is enabled, else None."""
+    if os.environ.get("SALES_OS_AI_ROUTER_DISABLED") == "1":
+        return None
+    url = os.environ.get("DECISION_ENGINE_URL")
+    return url.rstrip("/") if url else None
 
 
 def _get_client() -> "anthropic.Anthropic":
@@ -58,18 +78,69 @@ def _get_client() -> "anthropic.Anthropic":
     return _client
 
 
-def _call(
+def _call_via_router(
+    prompt: str,
+    *,
+    base_url: str,
+    prompt_version: str,
+    schema_version: str,
+    max_tokens: int,
+    provider: str,
+    model: str,
+    caller_function: str = "claude_reasoning._call",
+) -> str:
+    """Hit decision-engine /v1/ai/invoke — the ecosystem chokepoint."""
+    payload = {
+        "prompt": prompt,
+        "provider": provider,
+        "model": model,
+        "prompt_version": prompt_version,
+        "schema_version": schema_version,
+        "caller_engine": "sales-os",
+        "caller_function": caller_function,
+        "max_tokens": max_tokens,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        base_url + "/v1/ai/invoke",
+        data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    timeout = int(os.environ.get("SALES_OS_AI_ROUTER_TIMEOUT_S", "60"))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8")
+    parsed = json.loads(body)
+    _audit_log.info(
+        "ai_router_call audit_id=%s provider=%s model=%s prompt_version=%s "
+        "schema_version=%s in_tokens=%s out_tokens=%s cost_usd=%s latency_ms=%s",
+        parsed.get("audit_id"),
+        parsed.get("provider_used"),
+        parsed.get("model_used"),
+        parsed.get("prompt_version"),
+        parsed.get("schema_version"),
+        parsed.get("in_tokens"),
+        parsed.get("out_tokens"),
+        parsed.get("cost_usd"),
+        parsed.get("latency_ms"),
+    )
+    return parsed.get("text", "")
+
+
+def _call_direct_anthropic(
     prompt: str,
     *,
     prompt_version: str,
     schema_version: str,
-    max_tokens: int = 1024,
-    provider: str = PROVIDER,
-    model: str = MODEL,
+    max_tokens: int,
+    provider: str,
+    model: str,
 ) -> str:
-    """Provider-agnostic LLM invocation with mandatory audit envelope."""
+    """Local-dev fallback — direct Anthropic SDK."""
     if provider != "anthropic":
-        raise NotImplementedError(f"Provider {provider!r} not wired yet")
+        raise NotImplementedError(
+            f"Provider {provider!r} not wired in fallback path; "
+            "set DECISION_ENGINE_URL to use the multi-provider router"
+        )
     client = _get_client()
     message = client.messages.create(
         model=model,
@@ -79,11 +150,60 @@ def _call(
     text = message.content[0].text if message.content else ""
     _audit_log.info(
         "llm_call provider=%s model=%s prompt_version=%s schema_version=%s "
-        "in_chars=%d out_chars=%d",
+        "in_chars=%d out_chars=%d via=direct_fallback",
         provider, model, prompt_version, schema_version,
         len(prompt), len(text),
     )
     return text
+
+
+def _call(
+    prompt: str,
+    *,
+    prompt_version: str,
+    schema_version: str,
+    max_tokens: int = 1024,
+    provider: str = PROVIDER,
+    model: str = MODEL,
+) -> str:
+    """LLM invocation routed through ai_router when configured.
+
+    Decision tree:
+      1. DECISION_ENGINE_URL set + not kill-switched
+         → POST /v1/ai/invoke (chokepoint; signed audit row written
+           server-side; multi-provider fallback chain available)
+      2. Otherwise
+         → direct Anthropic SDK (backwards-compat path)
+
+    Caller-side errors are NOT swallowed; upstream functions wrap in
+    try/except to fall back to deterministic rules.
+    """
+    base = _decision_engine_url()
+    if base:
+        try:
+            return _call_via_router(
+                prompt,
+                base_url=base,
+                prompt_version=prompt_version,
+                schema_version=schema_version,
+                max_tokens=max_tokens,
+                provider=provider,
+                model=model,
+            )
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
+            _audit_log.warning(
+                "ai_router unreachable (%s); falling back to direct Anthropic",
+                exc,
+            )
+            # fall through
+    return _call_direct_anthropic(
+        prompt,
+        prompt_version=prompt_version,
+        schema_version=schema_version,
+        max_tokens=max_tokens,
+        provider=provider,
+        model=model,
+    )
 
 
 def _parse_json(text: str) -> dict:
