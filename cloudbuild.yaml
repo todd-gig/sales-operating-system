@@ -39,7 +39,10 @@ steps:
       # GIGATON_ENGINE_URL: internal Cloud Run URL for gigaton-engine
       # Format: https://gigaton-engine-<hash>-uc.a.run.app
       # Set this in Cloud Run console or replace $$GIGATON_ENGINE_URL below
-      - --set-env-vars=DATABASE_PATH=/data/sales_os.db,CORS_ORIGINS=https://gigaton-ui.web.app
+      # DECISION_ENGINE_URL routes claude_reasoning LLM calls through the
+      # ecosystem ai_router chokepoint (decision-engine /v1/ai/invoke) per
+      # CRIT-003 + CRIT-007. Override per-deploy in Cloud Run console.
+      - --set-env-vars=DATABASE_PATH=/data/sales_os.db,CORS_ORIGINS=https://gigaton-ui.web.app,DECISION_ENGINE_URL=https://decision-engine-825651647756.us-central1.run.app
       # Secrets (configure in Secret Manager, then reference here):
       # - --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest
       # - --set-secrets=GIGATON_ENGINE_URL=gigaton-engine-url:latest

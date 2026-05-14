@@ -67,7 +67,9 @@ steps:
       - --startup-probe=tcpSocket.port=8003,initialDelaySeconds=0,periodSeconds=10,timeoutSeconds=5,failureThreshold=30
       - --no-allow-unauthenticated
       # ── Cloud SQL connection env (Auth Proxy mounts at /cloudsql/<instance>) ──
-      - --set-env-vars=DATABASE_URL_SCHEME=postgresql+asyncpg,DB_HOST=/cloudsql/${_CLOUD_SQL_INSTANCE},DB_NAME=${_DB_NAME},DB_USER=${_DB_USER},CORS_ORIGINS=https://gigaton-ui.web.app
+      # DECISION_ENGINE_URL routes claude_reasoning through ai_router chokepoint
+      # (CRIT-003 + CRIT-007). Override per-deploy.
+      - --set-env-vars=DATABASE_URL_SCHEME=postgresql+asyncpg,DB_HOST=/cloudsql/${_CLOUD_SQL_INSTANCE},DB_NAME=${_DB_NAME},DB_USER=${_DB_USER},CORS_ORIGINS=https://gigaton-ui.web.app,DECISION_ENGINE_URL=https://decision-engine-825651647756.us-central1.run.app
       - --set-secrets=DB_PASSWORD=${_DB_PASSWORD_SECRET}:latest
       # Anthropic + Gigaton-engine secrets (configure in Secret Manager once):
       # - --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest
