@@ -1,0 +1,89 @@
+# Sales-OS Cloud Run deploy — Cloud SQL Postgres variant (runtime flip).
+#
+# This is the "runtime flip" cloudbuild that switches the live service
+# from SQLite-on-disk to Cloud SQL Postgres. The default cloudbuild.yaml
+# is preserved unchanged so rollback is `gcloud builds submit --config=cloudbuild.yaml`.
+#
+# Prerequisites (run scripts/provision_cloud_sql.sh first):
+#   1. Cloud SQL instance sales-os-pg created in $PROJECT_ID:$REGION
+#   2. Database sales_os exists
+#   3. App user sales_os_app exists with password in Secret Manager (sales-os-db-password)
+#   4. Runtime SA sales-operating-system-runtime@... has:
+#        roles/cloudsql.client
+#        roles/secretmanager.secretAccessor
+#   5. Alembic schema migrated (alembic upgrade head over Cloud SQL Auth Proxy)
+#
+# Substitutions:
+#   _CLOUD_SQL_INSTANCE — defaults to $PROJECT_ID:us-central1:sales-os-pg
+#   _DB_NAME            — defaults to sales_os
+#   _DB_USER            — defaults to sales_os_app
+#   _DB_PASSWORD_SECRET — defaults to sales-os-db-password
+#   _RUNTIME_SA         — defaults to sales-operating-system-runtime
+
+substitutions:
+  _CLOUD_SQL_INSTANCE: "${PROJECT_ID}:us-central1:sales-os-pg"
+  _DB_NAME: "sales_os"
+  _DB_USER: "sales_os_app"
+  _DB_PASSWORD_SECRET: "sales-os-db-password"
+  _RUNTIME_SA: "sales-operating-system-runtime"
+
+steps:
+  # ── Build ──────────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+      - -t
+      - gcr.io/$PROJECT_ID/sales-operating-system:latest
+      - .
+
+  # ── Push ──────────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [push, gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA]
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [push, gcr.io/$PROJECT_ID/sales-operating-system:latest]
+
+  # ── Deploy to Cloud Run with Cloud SQL connection ─────────────────────────
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - sales-operating-system
+      - --image=gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+      - --region=us-central1
+      - --platform=managed
+      - --port=8003
+      - --service-account=${_RUNTIME_SA}@$PROJECT_ID.iam.gserviceaccount.com
+      - --add-cloudsql-instances=${_CLOUD_SQL_INSTANCE}
+      - --min-instances=1
+      - --max-instances=5
+      - --memory=512Mi
+      - --cpu=1
+      - --cpu-boost
+      - --timeout=300
+      - --startup-probe=tcpSocket.port=8003,initialDelaySeconds=0,periodSeconds=10,timeoutSeconds=5,failureThreshold=30
+      - --no-allow-unauthenticated
+      # ── Cloud SQL connection env (Auth Proxy mounts at /cloudsql/<instance>) ──
+      - --set-env-vars=DATABASE_URL_SCHEME=postgresql+asyncpg,DB_HOST=/cloudsql/${_CLOUD_SQL_INSTANCE},DB_NAME=${_DB_NAME},DB_USER=${_DB_USER},CORS_ORIGINS=https://gigaton-ui.web.app
+      - --set-secrets=DB_PASSWORD=${_DB_PASSWORD_SECRET}:latest
+      # Anthropic + Gigaton-engine secrets (configure in Secret Manager once):
+      # - --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest
+      # - --set-secrets=GIGATON_ENGINE_URL=gigaton-engine-url:latest
+
+images:
+  - gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+  - gcr.io/$PROJECT_ID/sales-operating-system:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+timeout: 1200s
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rollback: redeploy with the original SQLite cloudbuild.yaml — that manifest
+# is untouched, so `gcloud builds submit --config=cloudbuild.yaml` reverts the
+# runtime in one command.
