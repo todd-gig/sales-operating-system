@@ -10,10 +10,15 @@ Required env var:
 
 If not configured, all functions return graceful fallbacks so the
 deterministic rules engine continues to work without Claude.
+
+Runtime governance (Gigaton Canonical First Principles §6): all LLM calls
+flow through `_call`, which carries provider, model, prompt_version, and
+schema_version, and emits an audit log line per invocation.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -24,8 +29,17 @@ try:
 except ImportError:
     _AVAILABLE = False
 
+PROVIDER = "anthropic"
 MODEL = "claude-opus-4-6"
+PROMPT_VERSION_EXPLAIN = "explain_recommendations.v1.0"
+SCHEMA_VERSION_EXPLAIN = "coaching_prose.v1"
+PROMPT_VERSION_PROPOSAL = "draft_proposal.v1.0"
+SCHEMA_VERSION_PROPOSAL = "proposal_markdown.v1"
+PROMPT_VERSION_NEEDS = "detect_need_states.v1.0"
+SCHEMA_VERSION_NEEDS = "matched_ids.v1"
+
 _client: "anthropic.Anthropic | None" = None
+_audit_log = logging.getLogger("sales_os.llm_audit")
 
 
 def is_available() -> bool:
@@ -44,14 +58,32 @@ def _get_client() -> "anthropic.Anthropic":
     return _client
 
 
-def _call(prompt: str, max_tokens: int = 1024) -> str:
+def _call(
+    prompt: str,
+    *,
+    prompt_version: str,
+    schema_version: str,
+    max_tokens: int = 1024,
+    provider: str = PROVIDER,
+    model: str = MODEL,
+) -> str:
+    """Provider-agnostic LLM invocation with mandatory audit envelope."""
+    if provider != "anthropic":
+        raise NotImplementedError(f"Provider {provider!r} not wired yet")
     client = _get_client()
     message = client.messages.create(
-        model=MODEL,
+        model=model,
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
-    return message.content[0].text if message.content else ""
+    text = message.content[0].text if message.content else ""
+    _audit_log.info(
+        "llm_call provider=%s model=%s prompt_version=%s schema_version=%s "
+        "in_chars=%d out_chars=%d",
+        provider, model, prompt_version, schema_version,
+        len(prompt), len(text),
+    )
+    return text
 
 
 def _parse_json(text: str) -> dict:
@@ -103,7 +135,12 @@ Write a concise coaching note (2-3 sentences) explaining:
 
 Be specific, practical, and direct. No bullet points — prose only."""
 
-    return _call(prompt, max_tokens=512)
+    return _call(
+        prompt,
+        prompt_version=PROMPT_VERSION_EXPLAIN,
+        schema_version=SCHEMA_VERSION_EXPLAIN,
+        max_tokens=512,
+    )
 
 
 def _fallback_explanation(recommendations: list[dict[str, Any]]) -> str:
@@ -160,7 +197,12 @@ Guidelines:
 
 Return only the markdown."""
 
-    return _call(prompt, max_tokens=1500)
+    return _call(
+        prompt,
+        prompt_version=PROMPT_VERSION_PROPOSAL,
+        schema_version=SCHEMA_VERSION_PROPOSAL,
+        max_tokens=1500,
+    )
 
 
 def _fallback_proposal(
@@ -211,6 +253,11 @@ Return ONLY valid JSON:
 
 Only include IDs where the evidence is strong and explicit."""
 
-    text = _call(prompt, max_tokens=256)
+    text = _call(
+        prompt,
+        prompt_version=PROMPT_VERSION_NEEDS,
+        schema_version=SCHEMA_VERSION_NEEDS,
+        max_tokens=256,
+    )
     result = _parse_json(text)
     return result.get("matched_ids", [])
