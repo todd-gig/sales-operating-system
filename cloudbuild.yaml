@@ -4,14 +4,14 @@ steps:
     args:
       - build
       - -t
-      - gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+      - gcr.io/$PROJECT_ID/sales-operating-system:$BUILD_ID
       - -t
       - gcr.io/$PROJECT_ID/sales-operating-system:latest
       - .
 
   # ── Push ──────────────────────────────────────────────────────────────────
   - name: 'gcr.io/cloud-builders/docker'
-    args: [push, gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA]
+    args: [push, gcr.io/$PROJECT_ID/sales-operating-system:$BUILD_ID]
 
   - name: 'gcr.io/cloud-builders/docker'
     args: [push, gcr.io/$PROJECT_ID/sales-operating-system:latest]
@@ -23,7 +23,7 @@ steps:
       - run
       - deploy
       - sales-operating-system
-      - --image=gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+      - --image=gcr.io/$PROJECT_ID/sales-operating-system:$BUILD_ID
       - --region=us-central1
       - --platform=managed
       - --port=8003
@@ -54,7 +54,7 @@ steps:
       # - --add-volume-mount=volume=salesos-data,mount-path=/data
 
 images:
-  - gcr.io/$PROJECT_ID/sales-operating-system:$COMMIT_SHA
+  - gcr.io/$PROJECT_ID/sales-operating-system:$BUILD_ID
   - gcr.io/$PROJECT_ID/sales-operating-system:latest
 
 options:
