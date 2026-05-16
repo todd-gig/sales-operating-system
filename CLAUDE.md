@@ -113,9 +113,9 @@ draft → ready → running → awaiting_approval → completed
 
 # Org Alignment
 
-This project is the commercial intelligence backbone of the broader Gigaton / Carmen Beach / LiquiFex sales architecture. The catalog and upsell logic here feed into:
+This project is the commercial intelligence backbone of the broader Gigaton / PDC / LiquiFex sales architecture. The catalog and upsell logic here feed into:
 - **Gigaton**: pricing and margin optimization decisions
-- **Carmen Beach**: service packaging and affiliate program design
+- **PDC**: service packaging and affiliate program design
 - **LiquiFex**: portfolio product recommendations
 
 Any changes to scoring weights, catalog items, or bundle definitions must be reviewed against downstream system dependencies.
